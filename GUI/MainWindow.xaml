@@ -51,6 +51,11 @@
                 HorizontalAlignment="Center"
                 Click="ResetButton_Click" />
 
+                <Button Grid.Row="0" Grid.Column="1" x:Name="AssembleButton" Content="Assemble"
+                Width="75" Height="30" Margin="10,0,0,10"
+                HorizontalAlignment="Center"
+                Click="AssembleButton_Click" />
+
                 <Button Grid.Row="0" Grid.Column="1" x:Name="ClearCacheButton" Content="Clear Cache"
                 Width="75" Height="30" Margin="10,0,0,10"
                 HorizontalAlignment="Center"

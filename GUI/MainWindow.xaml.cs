@@ -23,7 +23,7 @@ namespace GUI
         private string game;
         private string version;
         private string region;
-        private string categoryId;
+        private List<string> categoryIds = new();
         private string mode;
         private string previousVersion;
         private string stokenData;
@@ -90,11 +90,11 @@ namespace GUI
                 game = popup.SelectedGame;
                 region = popup.SelectedServer;
                 version = popup.SelectedVersion;
-                categoryId = popup.SelectedCategory;
+                categoryIds = popup.SelectedCategories;
                 mode = popup.SelectedMode;
                 previousVersion = popup.PreviousVersion;
                 stokenData = popup.STokenBuildData;
-                Console.WriteLine($"Selected: {game}, {region}, {version}, {categoryId} as {mode} (using prev as {previousVersion})");
+                Console.WriteLine($"Selected: {game}, {region}, {version}, [{string.Join(", ", categoryIds)}] as {mode} (using prev as {previousVersion})");
                 await UpdateFiles();
             }
         }
@@ -112,50 +112,69 @@ namespace GUI
 
             try
             {
-                var (manifest, buildDownloadUrl) = mode == "Sophon" ? await Sophon.GetManifest(game, version, region, categoryId, stokenData) : await Dispatch.GetFiles(game, version, categoryId);
-                if (manifest.Assets.Count == 0)
+                SophonManifestProto mergedManifest = new SophonManifestProto();
+                string firstDownloadUrl = "";
+
+                var cats = categoryIds.Count > 0 ? categoryIds : new List<string> { "" };
+
+                foreach (var catId in cats)
+                {
+                    var (manifest, buildDownloadUrl) = mode == "Sophon"
+                        ? await Sophon.GetManifest(game, version, region, catId, stokenData)
+                        : await Dispatch.GetFiles(game, version, catId);
+
+                    if (string.IsNullOrEmpty(firstDownloadUrl))
+                    {
+                        firstDownloadUrl = buildDownloadUrl;
+                        downloadUrl = buildDownloadUrl;
+                    }
+
+                    SophonManifestProto diffedManifest = new SophonManifestProto();
+                    if (previousVersion != null)
+                    {
+                        var (prevManifest, prevDownloadUrl) = await Sophon.GetManifest(game, $"{previousVersion}.0", region, catId);
+                        var prevMap = new Dictionary<string, string>();
+                        foreach (var asset in prevManifest.Assets)
+                        {
+                            prevMap[asset.AssetName] = asset.AssetHashMd5;
+                        }
+
+                        foreach (var asset in manifest.Assets)
+                        {
+                            if (!prevMap.ContainsKey(asset.AssetName))
+                            {
+                                diffedManifest.Assets.Add(asset);
+                                continue;
+                            }
+
+                            if (prevMap[asset.AssetName] != asset.AssetHashMd5)
+                            {
+                                diffedManifest.Assets.Add(asset);
+                                continue;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        foreach (var asset in manifest.Assets)
+                        {
+                            diffedManifest.Assets.Add(asset);
+                        }
+                    }
+
+                    foreach (var asset in diffedManifest.Assets)
+                        mergedManifest.Assets.Add(asset);
+                }
+
+                if (mergedManifest.Assets.Count == 0)
                 {
                     LoadingOverlay.Visibility = Visibility.Collapsed;
-                    MessageBox.Show("No files found in this package.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    MessageBox.Show("No files found in selected package(s).", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
                     await ShowPopup();
                     return;
                 }
-                downloadUrl = buildDownloadUrl;
 
-                SophonManifestProto diffedManifest = new SophonManifestProto();
-                if (previousVersion != null)
-                {
-                    // TODO: add scattered support
-                    var (prevManifest, prevDownloadUrl) = await Sophon.GetManifest(game, $"{previousVersion}.0", region, categoryId);
-                    var prevMap = new Dictionary<string, string>();
-                    foreach (var asset in prevManifest.Assets)
-                    {
-                        prevMap[asset.AssetName] = asset.AssetHashMd5;
-                    }
-
-                    foreach (var asset in manifest.Assets)
-                    {
-                        if (!prevMap.ContainsKey(asset.AssetName))
-                        {
-                            diffedManifest.Assets.Add(asset);
-                            continue;
-                        }
-
-                        if (prevMap[asset.AssetName] != asset.AssetHashMd5)
-                        {
-                            diffedManifest.Assets.Add(asset);
-                            continue;
-                        }
-                    }
-                } else
-                {
-                    foreach (var asset in manifest.Assets)
-                    {
-                        diffedManifest.Assets.Add(asset);
-                    }
-                }
-
-                foreach (var asset in diffedManifest.Assets)
+                foreach (var asset in mergedManifest.Assets)
                     AddFileToRoot(asset);
 
                 
@@ -416,24 +435,26 @@ namespace GUI
 
             if (toDownload.Count == 0)
             {
-                MessageBox.Show("No files selected. Please check the files you want to push.", "No Selection", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show("No files selected.", "No Selection", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
-            var choice = MessageBox.Show(
-                $"Push {toDownload.Count} file(s) to Motrix?\n\nYes = Send directly to Motrix via RPC (port 16800)\nNo = Generate aria2 input file for manual import",
-                "Push to Motrix", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-
-            if (choice == MessageBoxResult.Cancel)
-                return;
-
-            if (choice == MessageBoxResult.Yes)
+            bool isChunked = toDownload.Any(a => a.AssetChunks.Count > 0);
+            if (isChunked)
             {
-                await PushToMotrixRpc();
+                GenerateAria2InputFile();
             }
             else
             {
-                GenerateAria2InputFile();
+                var choice = MessageBox.Show(
+                    $"Push {toDownload.Count} file(s) to Motrix?\n\nYes = Send directly to Motrix via RPC (port 16800)\nNo = Generate aria2 input file",
+                    "Push to Motrix", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+                if (choice == MessageBoxResult.Cancel) return;
+                if (choice == MessageBoxResult.Yes)
+                    await PushToMotrixRpc();
+                else
+                    GenerateAria2InputFile();
             }
         }
 
@@ -504,45 +525,26 @@ namespace GUI
                 "Motrix Push", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
-        private void GenerateAria2InputFile()
+        private async void GenerateAria2InputFile()
         {
-            var saveDialog = new Microsoft.Win32.SaveFileDialog
+            if (toDownload.Count == 0) return;
+
+            var folderDialog = new System.Windows.Forms.FolderBrowserDialog
             {
-                Filter = "Aria2 Input File (*.txt)|*.txt|All Files (*.*)|*.*",
-                FileName = "meibrowser_aria2_input.txt",
-                DefaultExt = ".txt"
+                Description = "Select folder to save chunks (will create .aria2_temp subdirectory)"
             };
 
-            if (saveDialog.ShowDialog() != true)
+            if (folderDialog.ShowDialog() != System.Windows.Forms.DialogResult.OK)
                 return;
 
-            var lines = new List<string>();
-            foreach (var asset in toDownload)
-            {
-                if (asset.AssetChunks.Count > 1)
-                {
-                    lines.Add($"# {asset.AssetName} — chunked file (use MeiBrowser Download to assemble)");
-                    continue;
-                }
+            string tempDir = System.IO.Path.Combine(folderDialog.SelectedPath, ".aria2_temp");
+            System.IO.Directory.CreateDirectory(tempDir);
 
-                if (asset.AssetChunks.Count == 0)
-                {
-                    string fileUrl = downloadUrl;
-                    if (!fileUrl.EndsWith(asset.AssetName))
-                        fileUrl = $"{downloadUrl}/{asset.AssetName}";
-                    lines.Add(fileUrl);
-                    lines.Add($"  out={asset.AssetName.Replace('/', System.IO.Path.DirectorySeparatorChar)}");
-                }
-                else
-                {
-                    string url = downloadUrl.Replace("$0", asset.AssetChunks[0].ChunkName);
-                    lines.Add(url);
-                    lines.Add($"  out={asset.AssetChunks[0].ChunkName}");
-                }
-            }
+            string inputFile = System.IO.Path.Combine(tempDir, "urls.txt");
+            var assetList = toDownload.Select(a => (a, downloadUrl)).ToList();
+            await Aria2Downloader.GenerateChunkInputFile(inputFile, assetList, tempDir);
 
-            System.IO.File.WriteAllLines(saveDialog.FileName, lines);
-            MessageBox.Show($"Aria2 input file saved to:\n{saveDialog.FileName}\n\nImport into Motrix (File > Import) or use with aria2c --input-file.",
+            MessageBox.Show($"Aria2 input file saved to:\n{inputFile}\n\nImport into Motrix (File > Import) or run:\naria2c --input-file=\"{inputFile}\"\n\nAfter download completes, use MeiBrowser's 'Assemble from Temp' button to build final files.",
                 "Input File Generated", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
@@ -566,6 +568,76 @@ namespace GUI
                 Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
                 System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
             };
+        }
+
+        private async void AssembleButton_Click(object sender, RoutedEventArgs e)
+        {
+            var folderDialog = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = "Select folder containing .aria2_temp with downloaded chunks"
+            };
+
+            if (folderDialog.ShowDialog() != System.Windows.Forms.DialogResult.OK)
+                return;
+
+            string selectedPath = folderDialog.SelectedPath;
+            string tempDir;
+
+            if (System.IO.Path.GetFileName(selectedPath) == ".aria2_temp")
+            {
+                tempDir = selectedPath;
+            }
+            else
+            {
+                tempDir = System.IO.Path.Combine(selectedPath, ".aria2_temp");
+            }
+
+            if (!System.IO.Directory.Exists(tempDir))
+            {
+                MessageBox.Show("No .aria2_temp directory found at the selected location.", "Not Found", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            string savePath = System.IO.Path.GetDirectoryName(tempDir) ?? tempDir;
+
+            toDownload.Clear();
+            downloadSize = 0;
+            var uniqueSet = new HashSet<SophonManifestAssetProperty>();
+            CollectCheckedFiles(RootItem, uniqueSet);
+            toDownload.AddRange(uniqueSet);
+
+            if (toDownload.Count == 0)
+            {
+                MessageBox.Show("No files selected in the tree to assemble.", "No Selection", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            DownloadingOverlay.Visibility = Visibility.Visible;
+            DownloadBar.Value = 0;
+
+            try
+            {
+                var progress = new Progress<double>(v =>
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        double percent = toDownload.Sum(a => a.AssetSize) > 0 ? (double)(v / toDownload.Sum(a => a.AssetSize)) * 100 : 0;
+                        DownloadBar.Value = Math.Min(percent, 100);
+                        DownloadText.Text = $"Assembling: {percent:F1}%";
+                    });
+                });
+
+                await Aria2Downloader.AssembleOnlyAsync(toDownload, tempDir, progress, savePath);
+                MessageBox.Show("Assembly complete.", "Done", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Assembly failed: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                DownloadingOverlay.Visibility = Visibility.Collapsed;
+            }
         }
 
         private void ClearCacheButton_Click(object sender, RoutedEventArgs e)

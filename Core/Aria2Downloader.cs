@@ -88,20 +88,64 @@ namespace Core
             }
         }
 
+        public static async Task GenerateChunkInputFile(
+            string inputFilePath,
+            List<(SophonManifestAssetProperty asset, string downloadUrl)> assets,
+            string tempDir)
+        {
+            string dirArg = FormatAria2Dir(tempDir);
+            var lines = new List<string>();
+            int chunkCount = 0;
+            foreach (var (asset, downloadUrl) in assets)
+            {
+                if (asset.AssetChunks.Count == 0)
+                {
+                    string fileUrl = downloadUrl;
+                    if (!fileUrl.EndsWith(asset.AssetName))
+                        fileUrl = $"{downloadUrl}/{asset.AssetName}";
+                    string chunkName = asset.AssetName.Replace('/', '_');
+                    lines.Add(fileUrl);
+                    lines.Add($"  out={chunkName}");
+                    lines.Add(dirArg);
+                    chunkCount++;
+                }
+                else
+                {
+                    foreach (var chunk in asset.AssetChunks)
+                    {
+                        string url = downloadUrl.Replace("$0", chunk.ChunkName);
+                        lines.Add(url);
+                        lines.Add($"  out={chunk.ChunkName}");
+                        lines.Add(dirArg);
+                        chunkCount++;
+                    }
+                }
+            }
+            await File.WriteAllLinesAsync(inputFilePath, lines);
+            Console.WriteLine($"Generated aria2 input: {inputFilePath} ({chunkCount} chunks from {assets.Count} assets)");
+        }
+
         private async Task GenerateInputFileAsync(
             string inputFilePath,
             List<(string url, string filename, SophonManifestAssetProperty, SophonManifestAssetChunk)> chunks,
             string tempDir)
         {
+            string dirArg = FormatAria2Dir(tempDir);
             var lines = new List<string>();
             foreach (var (url, filename, _, _) in chunks)
             {
                 lines.Add(url);
                 lines.Add($"  out={filename}");
-                lines.Add($"  dir=\"{tempDir}\"");
+                lines.Add(dirArg);
             }
             await File.WriteAllLinesAsync(inputFilePath, lines);
             Console.WriteLine($"Generated aria2 input: {inputFilePath} ({chunks.Count} URLs)");
+        }
+
+        private static string FormatAria2Dir(string path)
+        {
+            string normalized = path.Replace('\\', '/');
+            return normalized.Contains(' ') ? $"  dir=\"{normalized}\"" : $"  dir={normalized}";
         }
 
         private async Task<bool> RunAria2Async(string inputFile, string tempDir, string aria2Path,
@@ -279,16 +323,6 @@ namespace Core
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
 
-            if (File.Exists(filePath))
-            {
-                if (asset.AssetHashMd5 != "")
-                {
-                    var existingMd5 = Utils.GetMd5(await File.ReadAllBytesAsync(filePath));
-                    if (existingMd5 == asset.AssetHashMd5)
-                        return;
-                }
-            }
-
             if (asset.AssetChunks.Count == 0)
             {
                 string chunkPath = Path.Combine(tempDir, asset.AssetName.Replace('/', Path.DirectorySeparatorChar));
@@ -296,18 +330,29 @@ namespace Core
                 {
                     File.Move(chunkPath, filePath, true);
                 }
+                else
+                {
+                    Console.WriteLine($"  Missing data for unchunked asset: {asset.AssetName}");
+                }
                 return;
             }
 
-            using var fs = new FileStream(filePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
-            if (fs.Length < asset.AssetSize)
-                fs.SetLength(asset.AssetSize);
+            int missingChunks = 0;
+            int failedDecompress = 0;
+            int failedMd5 = 0;
+
+            using var fs = new FileStream(filePath, FileMode.Create, FileAccess.ReadWrite, FileShare.Read);
+            fs.SetLength(asset.AssetSize);
 
             foreach (var chunk in asset.AssetChunks)
             {
                 string chunkPath = Path.Combine(tempDir, chunk.ChunkName);
                 if (!File.Exists(chunkPath))
+                {
+                    missingChunks++;
+                    Console.WriteLine($"  Missing chunk: {chunk.ChunkName} for {asset.AssetName}");
                     continue;
+                }
 
                 byte[] compressed = await File.ReadAllBytesAsync(chunkPath);
                 byte[] decompressed;
@@ -322,13 +367,22 @@ namespace Core
                 }
                 catch
                 {
+                    failedDecompress++;
                     Console.WriteLine($"  Decompression failed for chunk {chunk.ChunkName} in {asset.AssetName}");
+                    continue;
+                }
+
+                if (decompressed.Length != (long)chunk.ChunkSizeDecompressed)
+                {
+                    failedDecompress++;
+                    Console.WriteLine($"  Decompressed size mismatch for chunk {chunk.ChunkName} in {asset.AssetName}: expected {chunk.ChunkSizeDecompressed}, got {decompressed.Length}");
                     continue;
                 }
 
                 string actualMd5 = Utils.GetMd5(decompressed);
                 if (actualMd5 != chunk.ChunkDecompressedHashMd5)
                 {
+                    failedMd5++;
                     Console.WriteLine($"  MD5 mismatch for chunk {chunk.ChunkName} in {asset.AssetName}");
                     continue;
                 }
@@ -340,9 +394,60 @@ namespace Core
             fs.Flush();
             fs.Close();
 
+            if (missingChunks > 0 || failedDecompress > 0 || failedMd5 > 0)
+            {
+                Console.WriteLine($"  Assembly errors for {asset.AssetName}: {missingChunks} missing, {failedDecompress} decompress, {failedMd5} md5");
+            }
+
             string finalMd5 = Utils.GetMd5(await File.ReadAllBytesAsync(filePath));
             if (finalMd5 != asset.AssetHashMd5)
-                Console.WriteLine($"  Final MD5 mismatch for {asset.AssetName}");
+                Console.WriteLine($"  Final MD5 mismatch for {asset.AssetName}: expected {asset.AssetHashMd5}");
+        }
+
+        public static async Task AssembleOnlyAsync(
+            List<SophonManifestAssetProperty> assets,
+            string tempDir,
+            IProgress<double> progress,
+            string savePath)
+        {
+            int totalChunks = assets.Sum(a => a.AssetChunks.Count);
+            int missing = 0;
+            foreach (var asset in assets)
+            {
+                foreach (var chunk in asset.AssetChunks)
+                {
+                    if (!File.Exists(Path.Combine(tempDir, chunk.ChunkName)))
+                        missing++;
+                }
+            }
+            if (missing > 0)
+                Console.WriteLine($"Warning: {missing}/{totalChunks} chunks are missing from {tempDir}");
+
+            Console.WriteLine($"Assembling {assets.Count} files ({totalChunks} chunks) from {tempDir}...");
+            long assembled = 0;
+            int errors = 0;
+            foreach (var asset in assets)
+            {
+                await AssembleFileAsync(asset, tempDir, savePath);
+                assembled += asset.AssetSize;
+                progress.Report(assembled);
+
+                string filePath = Path.Combine(savePath, asset.AssetName.Replace('/', Path.DirectorySeparatorChar));
+                if (File.Exists(filePath))
+                {
+                    string md5 = Utils.GetMd5(await File.ReadAllBytesAsync(filePath));
+                    if (md5 != asset.AssetHashMd5)
+                        errors++;
+                }
+                else
+                {
+                    errors++;
+                }
+            }
+            if (errors > 0)
+                Console.WriteLine($"Assembly complete with {errors}/{assets.Count} files failed verification.");
+            else
+                Console.WriteLine("Assembly complete — all files verified.");
         }
 
         private static bool IsSafePath(string path)
