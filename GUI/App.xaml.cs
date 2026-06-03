@@ -2,26 +2,42 @@
 using System.Data;
 using System.IO;
 using System.Windows;
+using System.Windows.Threading;
 using Dark.Net;
 
 namespace GUI
 {
-    /// <summary>
-    /// Interaction logic for App.xaml
-    /// </summary>
     public partial class App : Application
     {
         protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
-            DarkNet.Instance.SetCurrentProcessTheme(Theme.Dark);
 
-            // TODO: add support for logging to file + console
-            //var logFile = "download.log";
-            //var fileStream = new FileStream(logFile, FileMode.Create, FileAccess.Write, FileShare.Read);
-            //var streamWriter = new StreamWriter(fileStream) { AutoFlush = true };
-            //Console.SetOut(streamWriter);
-            //Console.SetError(streamWriter);
+            DispatcherUnhandledException += (s, args) =>
+            {
+                MessageBox.Show($"Unhandled error:\n{args.Exception.Message}\n\n{args.Exception.StackTrace}",
+                    "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                try { File.AppendAllText("meibrowser_crash.log",
+                    $"[{DateTime.Now}] {args.Exception}\n"); } catch { }
+                args.Handled = true;
+            };
+
+            TaskScheduler.UnobservedTaskException += (s, args) =>
+            {
+                try { File.AppendAllText("meibrowser_crash.log",
+                    $"[{DateTime.Now}] Task: {args.Exception}\n"); } catch { }
+                args.SetObserved();
+            };
+
+            try
+            {
+                DarkNet.Instance.SetCurrentProcessTheme(Theme.Dark);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to set dark theme: {ex.Message}", "Warning",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
     }
 

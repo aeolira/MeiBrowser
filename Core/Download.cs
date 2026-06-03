@@ -11,7 +11,10 @@ namespace Core
 {
     public class Download
     {
-        private static readonly HttpClient http = new();
+        private static readonly HttpClient http = new()
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
 
         public async Task DownloadFilesAsync(List<SophonManifestAssetProperty> assets, string downloadUrl, IProgress<double> progress, string savePath)
         {

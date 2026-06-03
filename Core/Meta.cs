@@ -10,7 +10,10 @@ namespace Core
 {
     public class Meta
     {
-        private static readonly HttpClient client = new();
+        private static readonly HttpClient client = new()
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
 
         public static async Task<(List<string> versions, string packageId, string password, string preDownloadPassword)> GetVersions(string game, string region)
         {

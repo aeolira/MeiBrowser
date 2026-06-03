@@ -31,6 +31,9 @@ namespace GUI
         private List<SophonManifestAssetProperty> toDownload = new();
         private long downloadSize = 0;
         private string downloadUrl = "";
+        private bool useAria2 = false;
+
+        private bool _updatingCheckStates = false;
 
         private string appVersion = "1.1";
 
@@ -57,7 +60,16 @@ namespace GUI
         #region package selection
         private async void Window_Loaded(object sender, RoutedEventArgs e)
         {
-            await ShowPopup();
+            try
+            {
+                await Task.Run(CleanupStaleTempDirs);
+                await ShowPopup();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to start: {ex.Message}\n\nPlease check your network connection and try again.",
+                    "Startup Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         private async Task ShowPopup()
@@ -223,18 +235,86 @@ namespace GUI
         #endregion
 
         #region download files
+        private void FileCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            if (_updatingCheckStates) return;
+
+            var cb = sender as CheckBox;
+            if (cb?.DataContext is not FileItem item) return;
+
+            bool isChecked = cb.IsChecked == true;
+
+            try
+            {
+                _updatingCheckStates = true;
+                SetChildrenChecked(item, isChecked);
+            }
+            finally
+            {
+                _updatingCheckStates = false;
+                UpdateParentCheckState(item.Parent);
+            }
+        }
+
+        private static void SetChildrenChecked(FileItem parent, bool isChecked)
+        {
+            foreach (var child in parent.Children)
+            {
+                child.IsChecked = isChecked;
+                SetChildrenChecked(child, isChecked);
+            }
+        }
+
+        private static void UpdateParentCheckState(FileItem? parent)
+        {
+            if (parent == null) return;
+
+            if (parent.Children.Count == 0)
+            {
+                UpdateParentCheckState(parent.Parent);
+                return;
+            }
+
+            bool allChecked = parent.Children.All(c => c.IsChecked);
+
+            parent.IsChecked = allChecked;
+
+            UpdateParentCheckState(parent.Parent);
+        }
+
+        private void SelectAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            foreach (var child in RootItem.Children)
+            {
+                child.IsChecked = true;
+                SetChildrenChecked(child, true);
+            }
+        }
+
+        private void DeselectAllButton_Click(object sender, RoutedEventArgs e)
+        {
+            foreach (var child in RootItem.Children)
+            {
+                child.IsChecked = false;
+                SetChildrenChecked(child, false);
+            }
+        }
         private async void DownloadButton_Click(object sender, RoutedEventArgs e)
         {
-            var selected = FileTree.SelectedItem as FileItem;
             toDownload.Clear();
             downloadSize = 0;
 
-            if (selected == null)
+            var uniqueSet = new HashSet<SophonManifestAssetProperty>();
+            CollectCheckedFiles(RootItem, uniqueSet);
+            toDownload.AddRange(uniqueSet);
+
+            if (toDownload.Count == 0)
+            {
+                MessageBox.Show("No files selected. Please check the files you want to download.", "No Selection", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
+            }
 
-            addFolderToDownloads(selected);
-
-            var result = MessageBox.Show($"You are about to download {Utils.FormatSize(downloadSize)}, continue ?", "Continue?", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            var result = MessageBox.Show($"You are about to download {toDownload.Count} file(s) ({Utils.FormatSize(downloadSize)}), continue ?", "Continue?", MessageBoxButton.YesNo, MessageBoxImage.Question);
             if (result == MessageBoxResult.Yes)
             {
                 var dialog = new System.Windows.Forms.FolderBrowserDialog();
@@ -246,24 +326,38 @@ namespace GUI
             }
         }
 
-        private void addFolderToDownloads(FileItem node)
+        private void CollectCheckedFiles(FileItem node, HashSet<SophonManifestAssetProperty> uniqueSet)
         {
-            if (node.Type == "File")
+            if (node.IsChecked)
             {
-                toDownload.Add(node.SourceFile);
-                downloadSize += node.SizeInBytes;
+                if (node.Type == "File")
+                {
+                    if (uniqueSet.Add(node.SourceFile))
+                        downloadSize += node.SizeInBytes;
+                }
+                else
+                {
+                    AddFolderFiles(node, uniqueSet);
+                }
                 return;
             }
 
-            foreach (var item in node.Children)
+            foreach (var child in node.Children)
+                CollectCheckedFiles(child, uniqueSet);
+        }
+
+        private void AddFolderFiles(FileItem node, HashSet<SophonManifestAssetProperty> uniqueSet)
+        {
+            foreach (var child in node.Children)
             {
-                if (item.Type == "File")
+                if (child.Type == "File")
                 {
-                    toDownload.Add(item.SourceFile);
-                    downloadSize += item.SizeInBytes;
-                } else
+                    if (uniqueSet.Add(child.SourceFile))
+                        downloadSize += child.SizeInBytes;
+                }
+                else
                 {
-                    addFolderToDownloads(item);
+                    AddFolderFiles(child, uniqueSet);
                 }
             }
         }
@@ -271,24 +365,270 @@ namespace GUI
         private async Task StartDownload(string savePath)
         {
             DownloadingOverlay.Visibility = Visibility.Visible;
-            var downloader = new Download();
             DownloadBar.Value = 0;
 
             var progress = new Progress<double>(v =>
             {
-                double percent = (double)(v / downloadSize) * 100;
-                DownloadBar.Value = Math.Min(percent, 100);
-                DownloadText.Text = $"{percent:F1}% ({v / 1048576.0:F2} / {downloadSize / 1048576.0:F2} MB)";
+                Dispatcher.Invoke(() =>
+                {
+                    double percent = (double)(v / downloadSize) * 100;
+                    DownloadBar.Value = Math.Min(percent, 100);
+                    DownloadText.Text = $"Assembling: {percent:F1}% ({v / 1048576.0:F2} / {downloadSize / 1048576.0:F2} MB)";
+                });
             });
 
-            await downloader.DownloadFilesAsync(toDownload, downloadUrl, progress, savePath);
+            if (useAria2)
+            {
+                long totalCompressed = toDownload.Sum(a => a.AssetChunks.Sum(c => c.ChunkSize));
+                var aria2 = new Aria2Downloader();
+                aria2.DownloadProgressChanged += (downloaded, speed) =>
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        double pct = totalCompressed > 0 ? (double)downloaded / totalCompressed * 100 : 0;
+                        DownloadBar.Value = Math.Min(pct, 100);
+                        DownloadText.Text = $"{Utils.FormatSize(downloaded)} / {Utils.FormatSize(totalCompressed)} ({Utils.FormatSize(speed)}/s)";
+                    });
+                };
+                await aria2.DownloadFilesAsync(toDownload, downloadUrl, progress, savePath);
+            }
+            else
+            {
+                var downloader = new Download();
+                await downloader.DownloadFilesAsync(toDownload, downloadUrl, progress, savePath);
+            }
+
             DownloadingOverlay.Visibility = Visibility.Collapsed;
         }
+
+        private void Aria2CheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            useAria2 = Aria2CheckBox.IsChecked == true;
+            Console.WriteLine($"aria2 mode: {useAria2}");
+        }
+
+        private async void MotrixButton_Click(object sender, RoutedEventArgs e)
+        {
+            toDownload.Clear();
+            var uniqueSet = new HashSet<SophonManifestAssetProperty>();
+            CollectCheckedFiles(RootItem, uniqueSet);
+            toDownload.AddRange(uniqueSet);
+
+            if (toDownload.Count == 0)
+            {
+                MessageBox.Show("No files selected. Please check the files you want to push.", "No Selection", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var choice = MessageBox.Show(
+                $"Push {toDownload.Count} file(s) to Motrix?\n\nYes = Send directly to Motrix via RPC (port 16800)\nNo = Generate aria2 input file for manual import",
+                "Push to Motrix", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+            if (choice == MessageBoxResult.Cancel)
+                return;
+
+            if (choice == MessageBoxResult.Yes)
+            {
+                await PushToMotrixRpc();
+            }
+            else
+            {
+                GenerateAria2InputFile();
+            }
+        }
+
+        private async Task PushToMotrixRpc()
+        {
+            string rpcUrl = "http://localhost:16800/jsonrpc";
+
+            using var http = new System.Net.Http.HttpClient { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
+
+            try
+            {
+                var versionReq = BuildJsonRpc("aria2.getVersion");
+                var versionResp = await http.PostAsync(rpcUrl, new System.Net.Http.StringContent(versionReq, Encoding.UTF8, "application/json"));
+                versionResp.EnsureSuccessStatusCode();
+                Console.WriteLine("Motrix RPC connected.");
+            }
+            catch
+            {
+                var result = MessageBox.Show("Cannot connect to Motrix at localhost:16800.\n\nMake sure Motrix is running and RPC is enabled (Preferences > Advanced > RPC).\n\nGenerate aria2 input file instead?", "Motrix Not Found", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (result == MessageBoxResult.Yes)
+                    GenerateAria2InputFile();
+                return;
+            }
+
+            int pushed = 0;
+            foreach (var asset in toDownload)
+            {
+                if (asset.AssetChunks.Count > 1)
+                {
+                    Console.WriteLine($"Skipping chunked asset for Motrix: {asset.AssetName} (use Download button instead)");
+                    continue;
+                }
+
+                var urls = new List<string>();
+                if (asset.AssetChunks.Count == 0)
+                {
+                    string fileUrl = downloadUrl;
+                    if (!fileUrl.EndsWith(asset.AssetName))
+                        fileUrl = $"{downloadUrl}/{asset.AssetName}";
+                    urls.Add(fileUrl);
+                }
+                else
+                {
+                    urls.Add(downloadUrl.Replace("$0", asset.AssetChunks[0].ChunkName));
+                }
+
+                var addUriReq = BuildJsonRpc("aria2.addUri", new object[] { urls });
+                try
+                {
+                    var resp = await http.PostAsync(rpcUrl, new System.Net.Http.StringContent(addUriReq, Encoding.UTF8, "application/json"));
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        pushed++;
+                        Console.WriteLine($"Pushed to Motrix: {asset.AssetName}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Failed to push: {asset.AssetName} ({resp.StatusCode})");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error pushing {asset.AssetName}: {ex.Message}");
+                }
+            }
+
+            MessageBox.Show($"Pushed {pushed}/{toDownload.Count} file(s) to Motrix.\n\nNote: For sophon/chunked files, Motrix will download compressed chunks, not assembled final files.\nUse MeiBrowser's Download button to get assembled files.",
+                "Motrix Push", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private void GenerateAria2InputFile()
+        {
+            var saveDialog = new Microsoft.Win32.SaveFileDialog
+            {
+                Filter = "Aria2 Input File (*.txt)|*.txt|All Files (*.*)|*.*",
+                FileName = "meibrowser_aria2_input.txt",
+                DefaultExt = ".txt"
+            };
+
+            if (saveDialog.ShowDialog() != true)
+                return;
+
+            var lines = new List<string>();
+            foreach (var asset in toDownload)
+            {
+                if (asset.AssetChunks.Count > 1)
+                {
+                    lines.Add($"# {asset.AssetName} — chunked file (use MeiBrowser Download to assemble)");
+                    continue;
+                }
+
+                if (asset.AssetChunks.Count == 0)
+                {
+                    string fileUrl = downloadUrl;
+                    if (!fileUrl.EndsWith(asset.AssetName))
+                        fileUrl = $"{downloadUrl}/{asset.AssetName}";
+                    lines.Add(fileUrl);
+                    lines.Add($"  out={asset.AssetName.Replace('/', System.IO.Path.DirectorySeparatorChar)}");
+                }
+                else
+                {
+                    string url = downloadUrl.Replace("$0", asset.AssetChunks[0].ChunkName);
+                    lines.Add(url);
+                    lines.Add($"  out={asset.AssetChunks[0].ChunkName}");
+                }
+            }
+
+            System.IO.File.WriteAllLines(saveDialog.FileName, lines);
+            MessageBox.Show($"Aria2 input file saved to:\n{saveDialog.FileName}\n\nImport into Motrix (File > Import) or use with aria2c --input-file.",
+                "Input File Generated", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private static string BuildJsonRpc(string method, object? args = null)
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = "meibrowser",
+                method,
+                @params = args ?? new object[0]
+            });
+            return json;
+        }
+
+        private static string[] GetBaseSearchPaths()
+        {
+            return new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
+            };
+        }
+
+        private void ClearCacheButton_Click(object sender, RoutedEventArgs e)
+        {
+            var result = MessageBox.Show(
+                "This will delete all .aria2_temp cache directories in common download locations (Desktop, Downloads, Documents). Continue?",
+                "Clear Cache", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+            if (result != MessageBoxResult.Yes)
+                return;
+
+            int deleted = 0;
+            foreach (var basePath in GetBaseSearchPaths())
+            {
+                if (!System.IO.Directory.Exists(basePath)) continue;
+                try
+                {
+                    foreach (var dir in System.IO.Directory.GetDirectories(basePath, ".aria2_temp", System.IO.SearchOption.AllDirectories))
+                    {
+                        try
+                        {
+                            Core.Utils.DeleteDirectoryRobust(dir);
+                            deleted++;
+                            Console.WriteLine($"Cleaned up: {dir}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Could not delete {dir}: {ex.Message}");
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            MessageBox.Show(
+                deleted > 0 ? $"Cleaned up {deleted} cache director{(deleted == 1 ? "y" : "ies")}." : "No cache directories found.",
+                "Clear Cache", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private static void CleanupStaleTempDirs()
+        {
+            foreach (var basePath in GetBaseSearchPaths())
+            {
+                if (!System.IO.Directory.Exists(basePath)) continue;
+                try
+                {
+                    foreach (var dir in System.IO.Directory.GetDirectories(basePath, ".aria2_temp", System.IO.SearchOption.AllDirectories))
+                    {
+                        try { Core.Utils.DeleteDirectoryRobust(dir); Console.WriteLine($"Cleaned stale cache: {dir}"); }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+        }
+
         #endregion
     }
 
-    public class FileItem
+    public class FileItem : System.ComponentModel.INotifyPropertyChanged
     {
+        private bool _isChecked;
+
         public string Name { get; set; }
         public string Type => Children.Count == 0 ? "File" : "Folder";
         public ObservableCollection<FileItem> Children { get; set; } = new();
@@ -298,6 +638,21 @@ namespace GUI
         public SophonManifestAssetProperty SourceFile { get; set; }
         public string Elements => ElementsCount == 0 ? "" : $"{ElementsCount.ToString("# ##0")} files";
         public long ElementsCount { get; set; }
+
+        public bool IsChecked
+        {
+            get => _isChecked;
+            set
+            {
+                if (_isChecked != value)
+                {
+                    _isChecked = value;
+                    PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(IsChecked)));
+                }
+            }
+        }
+
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
 
         public FileItem? Parent { get; set; }
 

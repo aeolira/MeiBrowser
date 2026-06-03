@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Core
@@ -70,5 +72,62 @@ namespace Core
             using var md5 = MD5.Create();
             return BitConverter.ToString(md5.ComputeHash(data)).Replace("-", "").ToLowerInvariant();
         }
+
+        public static void DeleteDirectoryRobust(string path)
+        {
+            if (!Directory.Exists(path)) return;
+
+            foreach (var file in Directory.GetFiles(path, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    File.SetAttributes(file, FileAttributes.Normal);
+                    File.Delete(file);
+                }
+                catch
+                {
+                    try
+                    {
+                        var shortPath = GetShortPath(file);
+                        if (shortPath != null)
+                            File.Delete(shortPath);
+                    }
+                    catch { }
+                }
+            }
+
+            for (int retry = 0; retry < 5; retry++)
+            {
+                try
+                {
+                    Directory.Delete(path, true);
+                    return;
+                }
+                catch
+                {
+                    Thread.Sleep(500);
+                }
+            }
+
+            Directory.Delete(path, true);
+        }
+
+        private static string? GetShortPath(string longPath)
+        {
+            try
+            {
+                int capacity = 260;
+                var sb = new StringBuilder(capacity);
+                int len = GetShortPathName(longPath, sb, capacity);
+                return len > 0 && len < capacity ? sb.ToString() : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern int GetShortPathName(string lpszLongPath, StringBuilder lpszShortPath, int cchBuffer);
     }
 }

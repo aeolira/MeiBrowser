@@ -9,7 +9,10 @@ namespace Core
 {
     public class Dispatch
     {
-        private static readonly HttpClient client = new();
+        private static readonly HttpClient client = new()
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
 
         public static async Task<JObject> GetDispatchData()
         {

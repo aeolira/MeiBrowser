@@ -21,21 +21,50 @@
             </Grid.ColumnDefinitions>
 
             <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Center">
+                <Button Grid.Row="0" Grid.Column="0" x:Name="SelectAllButton" Content="Select All"
+                Width="75" Height="30" Margin="0,0,5,10"
+                HorizontalAlignment="Center"
+                Click="SelectAllButton_Click" />
+
+                <Button Grid.Row="0" Grid.Column="0" x:Name="DeselectAllButton" Content="Deselect All"
+                Width="75" Height="30" Margin="0,0,10,10"
+                HorizontalAlignment="Center"
+                Click="DeselectAllButton_Click" />
+
                 <Button Grid.Row="0" Grid.Column="0" x:Name="DownloadButton" Content="Download selected"
                 Width="150" Height="30" Margin="0,0,10,10"
                 HorizontalAlignment="Center"
                 Click="DownloadButton_Click" />
+
+                <CheckBox x:Name="Aria2CheckBox" Content="aria2" Foreground="White"
+                VerticalAlignment="Center" Margin="5,0,5,10"
+                Checked="Aria2CheckBox_Changed"
+                Unchecked="Aria2CheckBox_Changed" />
+
+                <Button Grid.Row="0" Grid.Column="1" x:Name="MotrixButton" Content="Push to Motrix"
+                Width="100" Height="30" Margin="10,0,0,10"
+                HorizontalAlignment="Center"
+                Click="MotrixButton_Click" />
                 
                 <Button Grid.Row="0" Grid.Column="1" x:Name="ResetButton" Content="Reset"
-                Width="150" Height="30" Margin="10,0,0,10"
+                Width="75" Height="30" Margin="10,0,0,10"
                 HorizontalAlignment="Center"
                 Click="ResetButton_Click" />
+
+                <Button Grid.Row="0" Grid.Column="1" x:Name="ClearCacheButton" Content="Clear Cache"
+                Width="75" Height="30" Margin="10,0,0,10"
+                HorizontalAlignment="Center"
+                Click="ClearCacheButton_Click" />
             </StackPanel>
 
             <TreeView Background="#2A2A2A" Name="FileTree" Grid.Row="1" Grid.ColumnSpan="2" ItemsSource="{Binding RootItems}">
                 <TreeView.Resources>
                     <HierarchicalDataTemplate DataType="{x:Type local:FileItem}" ItemsSource="{Binding Children}">
                         <StackPanel Orientation="Horizontal" Margin="2">
+                            <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      VerticalAlignment="Center" Margin="0,0,5,0"
+                                      Checked="FileCheckBox_Changed"
+                                      Unchecked="FileCheckBox_Changed" />
                             <Image Source="{Binding Icon}" Width="16" Height="16" Margin="0,0,5,0"/>
                             <TextBlock Text="{Binding Name}" Width="400"/>
                             <TextBlock Text="{Binding Size}" Width="80" HorizontalAlignment="Right"/>

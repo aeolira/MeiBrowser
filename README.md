@@ -3,6 +3,18 @@ Browse any hoyo games files &amp; download them at any version without having th
 
 ## [💻 Download latest build](https://nightly.link/Escartem/MeiBrowser/workflows/build/master/MeiBrowser.zip)
 
+> **Fork by aeolira** — Added multi-select checkboxes, Motrix/aria2 push, cache cleanup, crash handling, and more.
+
+## ✨ New Features (this fork)
+
+- **Multi-select checkboxes** — Select multiple files/folders at once via checkboxes in the file tree, with Select All / Deselect All buttons and parent-child auto-propagation
+- **Push to Motrix** — Send selected files directly to a local Motrix instance via aria2 JSON-RPC (port 16800), or generate an aria2-compatible input file for manual import
+- **Clear Cache** — One-click cleanup of leftover `.aria2_temp` directories from interrupted downloads across Desktop, Documents, and Downloads
+- **Aria2 integration** — Optional aria2c-based parallel chunked downloader with progress tracking and automatic fallback to HttpClient
+- **Crash resilience** — Global exception handler with crash log (`meibrowser_crash.log`) and user-friendly error dialogs instead of silent crashes
+- **HTTP timeouts** — All API requests have 15-second timeouts to prevent hanging on unreachable endpoints
+- **Stale cache cleanup on startup** — Automatically removes leftover `.aria2_temp` directories on each launch
+
 # Showcase
 
 ## Browse sophon files

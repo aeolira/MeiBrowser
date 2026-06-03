@@ -6,7 +6,10 @@ namespace Core
     public class Sophon
     {
         private static readonly string branch = "main";
-        private static readonly HttpClient client = new();
+        private static readonly HttpClient client = new()
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
 
         public static async Task<JObject> GetGameBranches(string game, string region)
         {
